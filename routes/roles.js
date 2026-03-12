@@ -1,63 +1,127 @@
 const express = require('express');
+const mongoose = require('mongoose');
+
 const router = express.Router();
-const { dataRole, dataUser } = require('../utils/data2');
+const Role = require('../schemas/role');
 
-// Helper
-const findRoleById = (id) => dataRole.find(r => r.id === id);
-
-// [GET] Lấy tất cả Roles
-router.get('/', (req, res) => res.json(dataRole));
-
-// [GET] Lấy tất cả users thuộc một Role cụ thể (PHẢI ĐẶT TRƯỚC /:id)
-router.get('/:id/users', (req, res) => {
-  const roleId = req.params.id;
-  
-  const role = findRoleById(roleId);
-  if (!role) {
-      // Trả về rõ lý do ID nào bị lỗi để dễ debug
-      return res.status(404).json({ error: `Không tìm thấy Role với ID là: ${roleId}` });
+// [GET] Get all roles (not soft-deleted)
+router.get('/', async (req, res) => {
+  try {
+    const roles = await Role.find({ isDeleted: false });
+    res.json(roles);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
-  
-  const users = dataUser.filter(u => u.role && u.role.id === roleId);
-  res.json(users);
 });
 
-// [GET] Chi tiết 1 Role
-router.get('/:id', (req, res) => {
-  const role = findRoleById(req.params.id);
-  role ? res.json(role) : res.status(404).json({ error: 'Role not found' });
+// [GET] Get role by id
+router.get('/:id', async (req, res) => {
+  try {
+    const roleId = req.params.id;
+    if (!mongoose.isValidObjectId(roleId)) {
+      return res.status(400).json({ message: `Invalid role id '${roleId}'` });
+    }
+
+    const role = await Role.findOne({ _id: roleId, isDeleted: false });
+    if (!role) {
+      return res.status(404).json({ message: `Role with ID ${roleId} not found` });
+    }
+
+    res.json(role);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
-// [POST] Tạo Role mới
-router.post('/', (req, res) => {
-  const { id, name, description } = req.body;
-  if (!id || !name) return res.status(400).json({ error: 'Missing fields' });
-  if (findRoleById(id)) return res.status(409).json({ error: 'Role already exists' });
+// [POST] Create role
+router.post('/', async (req, res) => {
+  try {
+    const { name, description } = req.body;
+    if (!name) {
+      return res.status(400).json({ message: 'Role name is required' });
+    }
 
-  const now = new Date().toISOString();
-  const newRole = { id, name, description, creationAt: now, updatedAt: now };
-  dataRole.push(newRole);
-  res.status(201).json(newRole);
+    const trimmedName = String(name).trim();
+    const existed = await Role.findOne({ name: trimmedName, isDeleted: false });
+    if (existed) {
+      return res.status(409).json({ message: `Role with name '${trimmedName}' already exists` });
+    }
+
+    const newRole = new Role({ name: trimmedName, description });
+    await newRole.save();
+
+    res.status(201).json(newRole);
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: 'Role name already exists' });
+    }
+    res.status(500).json({ message: err.message });
+  }
 });
 
-// [PUT] Cập nhật Role
-router.put('/:id', (req, res) => {
-  const role = findRoleById(req.params.id);
-  if (!role) return res.status(404).json({ error: 'Role not found' });
+// [PUT] Update role
+router.put('/:id', async (req, res) => {
+  try {
+    const roleId = req.params.id;
+    if (!mongoose.isValidObjectId(roleId)) {
+      return res.status(400).json({ message: `Invalid role id '${roleId}'` });
+    }
 
-  const { name, description } = req.body;
-  if (name) role.name = name;
-  if (description) role.description = description;
-  role.updatedAt = new Date().toISOString();
-  res.json(role);
+    const { name, description } = req.body;
+    if (!name && description === undefined) {
+      return res.status(400).json({ message: 'Nothing to update' });
+    }
+
+    const role = await Role.findOne({ _id: roleId, isDeleted: false });
+    if (!role) {
+      return res.status(404).json({ message: `Role with ID ${roleId} not found` });
+    }
+
+    if (name) {
+      const trimmedName = String(name).trim();
+      const existed = await Role.findOne({
+        _id: { $ne: role._id },
+        name: trimmedName,
+        isDeleted: false,
+      });
+      if (existed) {
+        return res.status(409).json({ message: `Role with name '${trimmedName}' already exists` });
+      }
+      role.name = trimmedName;
+    }
+    if (description !== undefined) role.description = description;
+
+    await role.save();
+    res.json(role);
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return res.status(409).json({ message: 'Role name already exists' });
+    }
+    res.status(500).json({ message: err.message });
+  }
 });
 
-// [DELETE] Xóa Role
-router.delete('/:id', (req, res) => {
-  const idx = dataRole.findIndex(r => r.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Role not found' });
-  const deleted = dataRole.splice(idx, 1);
-  res.json(deleted[0]);
+// [DELETE] Soft delete role
+router.delete('/:id', async (req, res) => {
+  try {
+    const roleId = req.params.id;
+    if (!mongoose.isValidObjectId(roleId)) {
+      return res.status(400).json({ message: `Invalid role id '${roleId}'` });
+    }
+
+    const role = await Role.findOne({ _id: roleId, isDeleted: false });
+    if (!role) {
+      return res.status(404).json({ message: `Role with ID ${roleId} not found` });
+    }
+
+    role.isDeleted = true;
+    await role.save();
+
+    res.json({ message: `Role '${role.name}' was soft deleted`, role });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 module.exports = router;
+
